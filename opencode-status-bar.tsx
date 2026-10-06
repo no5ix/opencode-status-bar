@@ -22,6 +22,7 @@ type Stat = {
 }
 
 const DEFAULT_SHOW = [
+  "context",
   "tps",
   "decode",
   "cost",
@@ -40,7 +41,6 @@ const usd = (c: number) =>
 const num = (v: unknown, d: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : d
 
-
 const formatTokenCount = (value: number): string =>
   Math.max(0, Math.round(value)).toLocaleString("en-US")
 
@@ -53,12 +53,8 @@ const formatPromptTimestamp = (date: Date): string =>
   })
 
 const extractMtplxContextWindow = (payload: any): number | undefined => {
-  if (!payload || typeof payload !== "object") {
-    return undefined
-  }
+  if (!payload || typeof payload !== "object") return undefined
 
-  // MTPLX exposes the resolved runtime context window from its memory
-  // planner on /health.
   const candidates = [
     payload.memory_plan?.context_window_resolved,
     payload.context_window_resolved,
@@ -68,11 +64,7 @@ const extractMtplxContextWindow = (payload: any): number | undefined => {
   ]
 
   for (const value of candidates) {
-    if (
-      typeof value === "number" &&
-      Number.isFinite(value) &&
-      value > 0
-    ) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
       return value
     }
   }
@@ -89,116 +81,52 @@ const providerBaseUrl = (provider: any): string | undefined => {
   ]
 
   for (const value of candidates) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim()
-    }
+    if (typeof value === "string" && value.trim()) return value.trim()
   }
 
   return undefined
 }
 
-const normalizeMtplxBaseUrl = (value: string): string => {
-  let url = value.trim().replace(/\/+$/, "")
+const normalizeMtplxBaseUrl = (value: string): string =>
+  value.trim().replace(/\\+$/, "").replace(/\/v1$/i, "")
 
-  // OpenCode OpenAI-compatible providers commonly store the API root as
-  // http://127.0.0.1:8000/v1. MTPLX /health lives one level above /v1.
-  url = url.replace(/\/v1$/i, "")
-
-  return url
-}
-
-const findMtplxBaseUrl = (
-  api: any,
-  sessionMessages: any[],
-): string | undefined => {
+const findMtplxBaseUrl = (api: any, messages: any[]): string | undefined => {
   let providerID: string | undefined
-  let modelID: string | undefined
 
-  for (let i = sessionMessages.length - 1; i >= 0; i--) {
-    const message = sessionMessages[i]
-
-    if (message?.role === "assistant") {
-      if (typeof message.providerID === "string") {
-        providerID = message.providerID
-      }
-      if (typeof message.modelID === "string") {
-        modelID = message.modelID
-      }
-      if (providerID && modelID) {
-        break
-      }
-    }
-
-    const selectedModel = message?.model ?? message?.info?.model
-
-    if (selectedModel) {
-      if (typeof selectedModel.providerID === "string") {
-        providerID = selectedModel.providerID
-      }
-      if (typeof selectedModel.modelID === "string") {
-        modelID = selectedModel.modelID
-      }
-      if (!modelID && typeof selectedModel.id === "string") {
-        modelID = selectedModel.id
-      }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message?.role === "assistant" && typeof message.providerID === "string") {
+      providerID = message.providerID
+      break
     }
   }
 
-  const providers = Array.isArray(api?.state?.provider)
-    ? api.state.provider
-    : []
+  const providers = Array.isArray(api?.state?.provider) ? api.state.provider : []
 
   if (providerID) {
-    const selectedProvider = providers.find(
-      (provider: any) => provider?.id === providerID,
-    )
-
-    const url = providerBaseUrl(selectedProvider)
-
-    if (url) {
-      return normalizeMtplxBaseUrl(url)
-    }
+    const provider = providers.find((item: any) => item?.id === providerID)
+    const url = providerBaseUrl(provider)
+    if (url) return normalizeMtplxBaseUrl(url)
   }
 
-  // If OpenCode's current model/provider identity is unavailable, prefer a
-  // provider with a localhost URL. This keeps the feature zero-config for a
-  // local MTPLX setup while avoiding a hard-coded MTPLX endpoint.
   for (const provider of providers) {
     const url = providerBaseUrl(provider)
-
-    if (!url) {
-      continue
-    }
-
+    if (!url) continue
     try {
       const parsed = new URL(url)
-      if (
-        parsed.hostname === "127.0.0.1" ||
-        parsed.hostname === "localhost" ||
-        parsed.hostname === "::1"
-      ) {
+      if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1") {
         return normalizeMtplxBaseUrl(url)
       }
-    } catch {
-      // Ignore malformed provider URLs.
-    }
+    } catch {}
   }
 
   return undefined
 }
 
-const fetchMtplxContextWindow = async (
-  baseUrl: string,
-): Promise<number | undefined> => {
+const fetchMtplxContextWindow = async (baseUrl: string): Promise<number | undefined> => {
   try {
-    const response = await fetch(
-      `${normalizeMtplxBaseUrl(baseUrl)}/health`,
-    )
-
-    if (!response.ok) {
-      return undefined
-    }
-
+    const response = await fetch(`${normalizeMtplxBaseUrl(baseUrl)}/health`)
+    if (!response.ok) return undefined
     return extractMtplxContextWindow(await response.json())
   } catch {
     return undefined
@@ -243,13 +171,8 @@ function StatusBarView(props: {
   // Current-prompt stopwatch.
   elapsedMs: () => number
 
-  // Timestamp of the most recent prompt submission.
   promptTimestamp: () => string | null
-
-  // Forces context information to refresh when OpenCode message state changes.
   contextRefreshTick: () => number
-
-  // Resolved MTPLX server-side context window.
   mtplxContextWindow: () => number | undefined
 
   show: string[]
@@ -426,137 +349,47 @@ function StatusBarView(props: {
 
   const contextInfo = createMemo(() => {
     const sessionID = props.sessionID()
-
-    if (!sessionID) {
-      return undefined
-    }
+    if (!sessionID) return undefined
 
     props.contextRefreshTick()
 
-    const messages =
-      props.api.state.session.messages(sessionID) ?? []
-
-    // Resolve the OpenCode model context limit immediately from the model
-    // selected for this session. This is available before the first MTPLX
-    // response arrives.
+    const messages = props.api.state.session.messages(sessionID) ?? []
     let providerID: string | undefined
     let modelID: string | undefined
 
     for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i] as any
-
-      if (message.role === "assistant") {
-        if (typeof message.providerID === "string") {
-          providerID = message.providerID
-        }
-        if (typeof message.modelID === "string") {
-          modelID = message.modelID
-        }
-        if (providerID && modelID) {
-          break
-        }
-      }
-
-      const selectedModel =
-        message.model ?? message.info?.model
-
-      if (selectedModel) {
-        if (typeof selectedModel.providerID === "string") {
-          providerID = selectedModel.providerID
-        }
-        if (typeof selectedModel.modelID === "string") {
-          modelID = selectedModel.modelID
-        }
-        if (!modelID && typeof selectedModel.id === "string") {
-          modelID = selectedModel.id
-        }
+      const message: any = messages[i]
+      if (message?.role === "assistant") {
+        if (typeof message.providerID === "string") providerID = message.providerID
+        if (typeof message.modelID === "string") modelID = message.modelID
+        if (providerID && modelID) break
       }
     }
 
-    let openCodeLimit: number | undefined
-
-    if (providerID && modelID) {
-      const providers = Array.isArray(props.api.state.provider)
-        ? props.api.state.provider
-        : []
-
-      const provider = providers.find(
-        (item: any) => item?.id === providerID,
-      )
-
-      const configuredLimit =
-        provider?.models?.[modelID]?.limit?.context
-
-      if (
-        typeof configuredLimit === "number" &&
-        configuredLimit > 0
-      ) {
-        openCodeLimit = configuredLimit
-      }
-    }
-
-    // Fallback to the most recent assistant's model identity.
-    if (!openCodeLimit) {
-      const lastAssistant = messages.findLast(
-        (message: any) =>
-          message.role === "assistant" &&
-          typeof message.providerID === "string" &&
-          typeof message.modelID === "string",
-      ) as any
-
-      if (lastAssistant) {
-        const providers = Array.isArray(props.api.state.provider)
-          ? props.api.state.provider
-          : []
-
-        const provider = providers.find(
-          (item: any) => item?.id === lastAssistant.providerID,
-        )
-
-        const configuredLimit =
-          provider?.models?.[lastAssistant.modelID]?.limit?.context
-
-        if (
-          typeof configuredLimit === "number" &&
-          configuredLimit > 0
-        ) {
-          openCodeLimit = configuredLimit
-        }
-      }
-    }
-
-    // Use the latest assistant token accounting already known by OpenCode.
-    // This lets the effective limit be calculated before the next task ends.
-    const lastAssistantWithTokens = messages.findLast(
-      (message: any) =>
-        message.role === "assistant" &&
-        message.tokens,
-    ) as any
-
-    const tokens = lastAssistantWithTokens?.tokens
-      ? (lastAssistantWithTokens.tokens.input ?? 0) +
-        (lastAssistantWithTokens.tokens.output ?? 0) +
-        (lastAssistantWithTokens.tokens.reasoning ?? 0) +
-        (lastAssistantWithTokens.tokens.cache?.read ?? 0) +
-        (lastAssistantWithTokens.tokens.cache?.write ?? 0)
-      : 0
+    const providers = Array.isArray(props.api.state.provider) ? props.api.state.provider : []
+    const provider = providerID ? providers.find((item: any) => item?.id === providerID) : undefined
+    const openCodeLimit = provider?.models?.[modelID ?? ""]?.limit?.context
 
     const mtplxLimit = props.mtplxContextWindow()
+    const effectiveLimit = mtplxLimit ?? (typeof openCodeLimit === "number" ? openCodeLimit : undefined)
 
-    // OpenCode is the temporary effective limit until MTPLX reports its
-    // runtime-resolved limit. After that, MTPLX becomes the source of truth.
-    const effectiveLimit = mtplxLimit ?? openCodeLimit
+    const lastAssistant = [...messages].reverse().find((message: any) => message?.role === "assistant") as any
+    const tokens = lastAssistant?.tokens
+      ? (lastAssistant.tokens.input ?? 0) +
+        (lastAssistant.tokens.output ?? 0) +
+        (lastAssistant.tokens.reasoning ?? 0) +
+        (lastAssistant.tokens.cache?.read ?? 0) +
+        (lastAssistant.tokens.cache?.write ?? 0)
+      : 0
 
     const usagePercent =
-      effectiveLimit && effectiveLimit > 0
+      typeof effectiveLimit === "number" && effectiveLimit > 0
         ? Math.round((tokens / effectiveLimit) * 100)
         : undefined
 
     return {
-      tokens,
-      openCodeLimit,
+      openCodeLimit: typeof openCodeLimit === "number" && openCodeLimit > 0 ? openCodeLimit : undefined,
       mtplxLimit,
-      effectiveLimit,
       usagePercent,
     }
   })
@@ -580,7 +413,6 @@ function StatusBarView(props: {
         <text fg={props.api.theme.current.textMuted}>
           {(() => {
             const context = contextInfo()!
-
             const openCodeText =
               context.openCodeLimit !== undefined
                 ? `OpenCode: ${formatTokenCount(context.openCodeLimit)}`
@@ -591,39 +423,26 @@ function StatusBarView(props: {
                 ? `MTPLX: ${formatTokenCount(context.mtplxLimit)}`
                 : "MTPLX: ⏬ ❓"
 
-            let status = "❓"
+            const status =
+              context.openCodeLimit !== undefined && context.mtplxLimit !== undefined
+                ? context.openCodeLimit === context.mtplxLimit ? "✅ " : "⚠️ "
+                : "❓"
 
-            if (
-              context.openCodeLimit !== undefined &&
-              context.mtplxLimit !== undefined
-            ) {
-              status =
-                context.openCodeLimit === context.mtplxLimit
-                  ? "✅"
-                  : "⚠️"
-            }
+            const relation =
+              context.openCodeLimit !== undefined && context.mtplxLimit !== undefined
+                ? context.openCodeLimit === context.mtplxLimit ? "=" : "≠"
+                : "·"
 
-            return `ctx  ${openCodeText} · ${mtplxText} ${status}`
+            return `${status} ctx ${openCodeText} ${relation} ${mtplxText} · ⏰ ${formatElapsed(props.elapsedMs())} · ${(() => {
+              const timestamp = props.promptTimestamp()
+              return timestamp ? `⤴️ ${timestamp}` : "⤴️ --:--:--"
+            })()}`
           })()}
         </text>
       ) : null}
 
       <text fg={props.api.theme.current.textMuted}>
-        {(() => {
-          const timestamp = props.promptTimestamp()
-
-          return timestamp
-            ? `↩︎ ${timestamp}${SEP}`
-            : ""
-        })()}
-        {`⏱ ${formatElapsed(props.elapsedMs())}`}
-        {(() => {
-          const existing = existingSegments()
-
-          return existing
-            ? `${SEP}${existing}`
-            : ""
-        })()}
+        {existingSegments()}
       </text>
     </box>
   )
@@ -638,11 +457,15 @@ const tui: TuiPlugin = async (api, options) => {
   // Configuration
   // ---------------------------------------------------------------------------
 
-  const show = Array.isArray(options?.show)
+  const configuredShow = Array.isArray(options?.show)
     ? (options.show as unknown[]).filter(
         (x): x is string => typeof x === "string",
       )
     : DEFAULT_SHOW
+
+  const show = configuredShow.includes("context")
+    ? configuredShow
+    : ["context", ...configuredShow]
 
   const marginTop = num(options?.marginTop, 0)
   const marginBottom = num(options?.marginBottom, 0)
@@ -651,62 +474,9 @@ const tui: TuiPlugin = async (api, options) => {
   const paddingLeft = num(options?.paddingLeft, 3)
   const paddingRight = num(options?.paddingRight, 2)
 
-  // ---------------------------------------------------------------------------
-  // REACTIVE CONTEXT / PROMPT DATA
-  // ---------------------------------------------------------------------------
-
-  const [promptTimestamp, setPromptTimestamp] =
-    createSignal<string | null>(null)
-
-  const [contextRefreshTick, setContextRefreshTick] =
-    createSignal(0)
-
-  const [mtplxContextWindow, setMtplxContextWindow] =
-    createSignal<number | undefined>(undefined)
-
-  let mtplxPollTimer: ReturnType<typeof setInterval> | undefined
-
-  const pollMtplx = async () => {
-    const route = api.route.current
-
-    if (route.name !== "session" || !("params" in route)) {
-      setMtplxContextWindow(undefined)
-      return
-    }
-
-    const sessionID = route.params?.sessionID
-
-    if (typeof sessionID !== "string") {
-      setMtplxContextWindow(undefined)
-      return
-    }
-
-    const messages = api.state.session.messages(sessionID) ?? []
-    const baseUrl = findMtplxBaseUrl(api, messages)
-
-    if (!baseUrl) {
-      setMtplxContextWindow(undefined)
-      return
-    }
-
-    setMtplxContextWindow(
-      await fetchMtplxContextWindow(baseUrl),
-    )
-  }
-
-  // Poll the same provider endpoint OpenCode already uses. There is no
-  // separate MTPLX URL in tui.json and no hard-coded MTPLX port.
-  void pollMtplx()
-
-  mtplxPollTimer = setInterval(() => {
-    void pollMtplx()
-  }, 2000)
-
-  onCleanup(() => {
-    if (mtplxPollTimer) {
-      clearInterval(mtplxPollTimer)
-    }
-  })
+  const [promptTimestamp, setPromptTimestamp] = createSignal<string | null>(null)
+  const [contextRefreshTick, setContextRefreshTick] = createSignal(0)
+  const [mtplxContextWindow, setMtplxContextWindow] = createSignal<number | undefined>(undefined)
 
   // ---------------------------------------------------------------------------
   // CURRENT SESSION
@@ -727,6 +497,31 @@ const tui: TuiPlugin = async (api, options) => {
     return typeof id === "string"
       ? id
       : undefined
+  })
+
+  let mtplxPollTimer: ReturnType<typeof setInterval> | undefined
+
+  const pollMtplx = async () => {
+    const sessionID = currentSession()
+    if (!sessionID) {
+      setMtplxContextWindow(undefined)
+      return
+    }
+
+    const messages = api.state.session.messages(sessionID) ?? []
+    const baseUrl = findMtplxBaseUrl(api, messages)
+    if (!baseUrl) {
+      setMtplxContextWindow(undefined)
+      return
+    }
+
+    setMtplxContextWindow(await fetchMtplxContextWindow(baseUrl))
+  }
+
+  void pollMtplx()
+  mtplxPollTimer = setInterval(() => void pollMtplx(), 2000)
+  onCleanup(() => {
+    if (mtplxPollTimer) clearInterval(mtplxPollTimer)
   })
 
   // ---------------------------------------------------------------------------
@@ -967,11 +762,8 @@ const tui: TuiPlugin = async (api, options) => {
 
       if (info.role === "user") {
         if (typeof info.time?.created === "number") {
-          setPromptTimestamp(
-            formatPromptTimestamp(new Date(info.time.created)),
-          )
+          setPromptTimestamp(formatPromptTimestamp(new Date(info.time.created)))
         }
-
         return
       }
 
