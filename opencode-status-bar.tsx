@@ -652,6 +652,12 @@ const tui: TuiPlugin = async (api, options) => {
         return
       }
 
+      const now = Date.now()
+
+      setPromptTimestamp(
+        formatPromptTimestamp(new Date(now))
+      )
+
       startStopwatch(sessionID)
     },
   )
@@ -760,12 +766,12 @@ const tui: TuiPlugin = async (api, options) => {
         return
       }
 
-      if (info.role === "user") {
-        if (typeof info.time?.created === "number") {
-          setPromptTimestamp(formatPromptTimestamp(new Date(info.time.created)))
-        }
-        return
-      }
+      // if (info.role === "user") {
+      //   if (typeof info.time?.created === "number") {
+      //     setPromptTimestamp(formatPromptTimestamp(new Date(info.time.created)))
+      //   }
+      //   return
+      // }
 
       if (info.role !== "assistant") {
         return
