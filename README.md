@@ -13,6 +13,7 @@ display:
 -   Time to first token
 -   Last-turn duration
 -   Prompt cache hit rate
+-   Context-window usage (OpenCode vs. MTPLX resolved limit)
 -   Todo progress
 -   Pending permissions/questions
 
@@ -167,24 +168,56 @@ cache 82%
 
 ### Context Window
 
-Displays the current context-window usage together with the model's
-context limit.
+Displays the current context-window limits from two sources so you can
+verify that OpenCode and your local MTPLX server agree on the effective
+context size.
 
 Example:
 
 ``` text
-Context ██████░░░░░░░░░░ 39%  154,293 / 400,000
+ctx  OpenCode: 400,000 · MTPLX: 400,000 ✅
+```
+
+When the two sources disagree:
+
+``` text
+ctx  OpenCode: 400,000 · MTPLX: 200,000 ⚠️
+```
+
+When the MTPLX limit has not yet been fetched:
+
+``` text
+ctx  OpenCode: 400,000 · MTPLX: ⏬ ❓
 ```
 
 The context indicator shows:
 
--   The current context usage percentage.
--   A graphical usage bar.
--   The number of context tokens currently used.
--   The maximum context-window size supported by the active model.
+-   **OpenCode limit** — the context window configured for the active
+    model in OpenCode's provider settings (`provider.models[modelID].limit.context`).
+-   **MTPLX limit** — the runtime-resolved context window reported by
+    the MTPLX server via its `/health` endpoint. This is polled every
+    2 seconds from the same base URL OpenCode already uses for the
+    active provider (no additional configuration required).
+-   **Agreement status** — ✅ when both limits are known and match,
+    ⚠️ when they differ, ❓ when either source is unavailable.
 
-The graphical bar is designed to make high context usage easy to
-recognize at a glance.
+The MTPLX `/health` endpoint is expected to expose the resolved context
+window under one of:
+
+-   `memory_plan.context_window_resolved`
+-   `context_window_resolved`
+-   `memory_plan.context_window`
+-   `context_window`
+-   `resolved_context_window`
+
+If none of these fields are present, the MTPLX value remains
+unavailable and only the OpenCode limit is shown.
+
+The `context` indicator is opt-in — add `"context"` to the `show`
+array in your `tui.json` to enable it.
+
+This is useful for confirming that MTPLX is honouring the correct
+context budget before you encounter truncation or unexpected costs.
 
 ### Todo Progress
 
@@ -221,7 +254,7 @@ The indicator is hidden when there are no pending requests.
 A fully populated status bar might look like:
 
 ``` text
-Context ██████░░░░░░░░░░ 39%  154,293 / 400,000
+ctx  OpenCode: 400,000 · MTPLX: 400,000 ✅
 ↩︎ 19:00 · ⏱ 6m08s · ⚡ 106.3 tok/s · decode 142.7 tok/s · $0.1234 · ttft 0.42s · 8.3s · cache 82% · todo 2/5 · pending 1
 ```
 
@@ -325,6 +358,9 @@ todo
 pending
 ```
 
+`context` is not enabled by default. Add it to the `show` array to
+display the context-window line.
+
 For example:
 
 ``` json
@@ -392,6 +428,12 @@ api.slots.register(...)
 
 The status bar is therefore rendered as part of the OpenCode TUI rather
 than modifying OpenCode itself.
+
+For the context-window indicator, the plugin also polls the active
+provider's `/health` endpoint every 2 seconds (derived from the same
+base URL OpenCode already uses, with the trailing `/v1` stripped) to
+read the MTPLX runtime-resolved context limit. This requires no
+separate MTPLX URL in `tui.json`.
 
 ------------------------------------------------------------------------
 

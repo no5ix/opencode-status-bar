@@ -22,7 +22,6 @@ type Stat = {
 }
 
 const DEFAULT_SHOW = [
-  "context",
   "tps",
   "decode",
   "cost",
@@ -41,25 +40,174 @@ const usd = (c: number) =>
 const num = (v: unknown, d: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : d
 
+
 const formatTokenCount = (value: number): string =>
   Math.max(0, Math.round(value)).toLocaleString("en-US")
 
-const contextBarParts = (percent: number, width = 16) => {
-  const clamped = Math.max(0, Math.min(100, percent))
-  const filled = Math.round((clamped / 100) * width)
+const formatPromptTimestamp = (date: Date): string =>
+  date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
 
-  return {
-    filled: "█".repeat(filled),
-    empty: "░".repeat(width - filled),
+const extractMtplxContextWindow = (payload: any): number | undefined => {
+  if (!payload || typeof payload !== "object") {
+    return undefined
+  }
+
+  // MTPLX exposes the resolved runtime context window from its memory
+  // planner on /health.
+  const candidates = [
+    payload.memory_plan?.context_window_resolved,
+    payload.context_window_resolved,
+    payload.memory_plan?.context_window,
+    payload.context_window,
+    payload.resolved_context_window,
+  ]
+
+  for (const value of candidates) {
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value > 0
+    ) {
+      return value
+    }
+  }
+
+  return undefined
+}
+
+const providerBaseUrl = (provider: any): string | undefined => {
+  const candidates = [
+    provider?.options?.baseURL,
+    provider?.options?.baseUrl,
+    provider?.baseURL,
+    provider?.baseUrl,
+  ]
+
+  for (const value of candidates) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return undefined
+}
+
+const normalizeMtplxBaseUrl = (value: string): string => {
+  let url = value.trim().replace(/\/+$/, "")
+
+  // OpenCode OpenAI-compatible providers commonly store the API root as
+  // http://127.0.0.1:8000/v1. MTPLX /health lives one level above /v1.
+  url = url.replace(/\/v1$/i, "")
+
+  return url
+}
+
+const findMtplxBaseUrl = (
+  api: any,
+  sessionMessages: any[],
+): string | undefined => {
+  let providerID: string | undefined
+  let modelID: string | undefined
+
+  for (let i = sessionMessages.length - 1; i >= 0; i--) {
+    const message = sessionMessages[i]
+
+    if (message?.role === "assistant") {
+      if (typeof message.providerID === "string") {
+        providerID = message.providerID
+      }
+      if (typeof message.modelID === "string") {
+        modelID = message.modelID
+      }
+      if (providerID && modelID) {
+        break
+      }
+    }
+
+    const selectedModel = message?.model ?? message?.info?.model
+
+    if (selectedModel) {
+      if (typeof selectedModel.providerID === "string") {
+        providerID = selectedModel.providerID
+      }
+      if (typeof selectedModel.modelID === "string") {
+        modelID = selectedModel.modelID
+      }
+      if (!modelID && typeof selectedModel.id === "string") {
+        modelID = selectedModel.id
+      }
+    }
+  }
+
+  const providers = Array.isArray(api?.state?.provider)
+    ? api.state.provider
+    : []
+
+  if (providerID) {
+    const selectedProvider = providers.find(
+      (provider: any) => provider?.id === providerID,
+    )
+
+    const url = providerBaseUrl(selectedProvider)
+
+    if (url) {
+      return normalizeMtplxBaseUrl(url)
+    }
+  }
+
+  // If OpenCode's current model/provider identity is unavailable, prefer a
+  // provider with a localhost URL. This keeps the feature zero-config for a
+  // local MTPLX setup while avoiding a hard-coded MTPLX endpoint.
+  for (const provider of providers) {
+    const url = providerBaseUrl(provider)
+
+    if (!url) {
+      continue
+    }
+
+    try {
+      const parsed = new URL(url)
+      if (
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "::1"
+      ) {
+        return normalizeMtplxBaseUrl(url)
+      }
+    } catch {
+      // Ignore malformed provider URLs.
+    }
+  }
+
+  return undefined
+}
+
+const fetchMtplxContextWindow = async (
+  baseUrl: string,
+): Promise<number | undefined> => {
+  try {
+    const response = await fetch(
+      `${normalizeMtplxBaseUrl(baseUrl)}/health`,
+    )
+
+    if (!response.ok) {
+      return undefined
+    }
+
+    return extractMtplxContextWindow(await response.json())
+  } catch {
+    return undefined
   }
 }
 
 // -----------------------------------------------------------------------------
 // Stopwatch formatting
 // -----------------------------------------------------------------------------
-
-const formatPromptTimestamp = (date: Date = new Date()): string =>
-  `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`
 
 const formatElapsed = (ms: number): string => {
   const totalSeconds = Math.floor(Math.max(0, ms) / 1000)
@@ -97,6 +245,12 @@ function StatusBarView(props: {
 
   // Timestamp of the most recent prompt submission.
   promptTimestamp: () => string | null
+
+  // Forces context information to refresh when OpenCode message state changes.
+  contextRefreshTick: () => number
+
+  // Resolved MTPLX server-side context window.
+  mtplxContextWindow: () => number | undefined
 
   show: string[]
 
@@ -266,6 +420,10 @@ function StatusBarView(props: {
       .join(SEP)
   })
 
+  // ---------------------------------------------------------------------------
+  // Context window information
+  // ---------------------------------------------------------------------------
+
   const contextInfo = createMemo(() => {
     const sessionID = props.sessionID()
 
@@ -273,42 +431,133 @@ function StatusBarView(props: {
       return undefined
     }
 
+    props.contextRefreshTick()
+
     const messages =
       props.api.state.session.messages(sessionID) ?? []
 
-    // Match OpenCode's built-in sidebar context calculation.
-    const lastAssistant = messages.findLast(
+    // Resolve the OpenCode model context limit immediately from the model
+    // selected for this session. This is available before the first MTPLX
+    // response arrives.
+    let providerID: string | undefined
+    let modelID: string | undefined
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i] as any
+
+      if (message.role === "assistant") {
+        if (typeof message.providerID === "string") {
+          providerID = message.providerID
+        }
+        if (typeof message.modelID === "string") {
+          modelID = message.modelID
+        }
+        if (providerID && modelID) {
+          break
+        }
+      }
+
+      const selectedModel =
+        message.model ?? message.info?.model
+
+      if (selectedModel) {
+        if (typeof selectedModel.providerID === "string") {
+          providerID = selectedModel.providerID
+        }
+        if (typeof selectedModel.modelID === "string") {
+          modelID = selectedModel.modelID
+        }
+        if (!modelID && typeof selectedModel.id === "string") {
+          modelID = selectedModel.id
+        }
+      }
+    }
+
+    let openCodeLimit: number | undefined
+
+    if (providerID && modelID) {
+      const providers = Array.isArray(props.api.state.provider)
+        ? props.api.state.provider
+        : []
+
+      const provider = providers.find(
+        (item: any) => item?.id === providerID,
+      )
+
+      const configuredLimit =
+        provider?.models?.[modelID]?.limit?.context
+
+      if (
+        typeof configuredLimit === "number" &&
+        configuredLimit > 0
+      ) {
+        openCodeLimit = configuredLimit
+      }
+    }
+
+    // Fallback to the most recent assistant's model identity.
+    if (!openCodeLimit) {
+      const lastAssistant = messages.findLast(
+        (message: any) =>
+          message.role === "assistant" &&
+          typeof message.providerID === "string" &&
+          typeof message.modelID === "string",
+      ) as any
+
+      if (lastAssistant) {
+        const providers = Array.isArray(props.api.state.provider)
+          ? props.api.state.provider
+          : []
+
+        const provider = providers.find(
+          (item: any) => item?.id === lastAssistant.providerID,
+        )
+
+        const configuredLimit =
+          provider?.models?.[lastAssistant.modelID]?.limit?.context
+
+        if (
+          typeof configuredLimit === "number" &&
+          configuredLimit > 0
+        ) {
+          openCodeLimit = configuredLimit
+        }
+      }
+    }
+
+    // Use the latest assistant token accounting already known by OpenCode.
+    // This lets the effective limit be calculated before the next task ends.
+    const lastAssistantWithTokens = messages.findLast(
       (message: any) =>
         message.role === "assistant" &&
-        message.tokens &&
-        (message.tokens.output ?? 0) > 0,
-    )
+        message.tokens,
+    ) as any
 
-    if (!lastAssistant) {
-      return undefined
-    }
+    const tokens = lastAssistantWithTokens?.tokens
+      ? (lastAssistantWithTokens.tokens.input ?? 0) +
+        (lastAssistantWithTokens.tokens.output ?? 0) +
+        (lastAssistantWithTokens.tokens.reasoning ?? 0) +
+        (lastAssistantWithTokens.tokens.cache?.read ?? 0) +
+        (lastAssistantWithTokens.tokens.cache?.write ?? 0)
+      : 0
 
-    const tokens =
-      (lastAssistant.tokens.input ?? 0) +
-      (lastAssistant.tokens.output ?? 0) +
-      (lastAssistant.tokens.reasoning ?? 0) +
-      (lastAssistant.tokens.cache?.read ?? 0) +
-      (lastAssistant.tokens.cache?.write ?? 0)
+    const mtplxLimit = props.mtplxContextWindow()
 
-    const model = props.api.state.provider
-      .find((provider: any) => provider.id === lastAssistant.providerID)
-      ?.models?.[lastAssistant.modelID]
+    // OpenCode is the temporary effective limit until MTPLX reports its
+    // runtime-resolved limit. After that, MTPLX becomes the source of truth.
+    const effectiveLimit = mtplxLimit ?? openCodeLimit
 
-    const limit = model?.limit?.context
-
-    if (typeof limit !== "number" || limit <= 0) {
-      return undefined
-    }
+    const usagePercent =
+      effectiveLimit && effectiveLimit > 0
+        ? Math.round((tokens / effectiveLimit) * 100)
+        : undefined
 
     return {
       tokens,
-      limit,
-      percent: Math.round((tokens / limit) * 100),
+      openCodeLimit,
+      mtplxLimit,
+      effectiveLimit,
+      usagePercent,
     }
   })
 
@@ -328,26 +577,37 @@ function StatusBarView(props: {
       marginBottom={props.marginBottom}
     >
       {props.show.includes("context") && contextInfo() ? (
-        <text>
+        <text fg={props.api.theme.current.textMuted}>
           {(() => {
             const context = contextInfo()!
-            const bar = contextBarParts(context.percent)
-            const theme = props.api.theme.current
 
-            return (
-              <>
-                <span fg={theme.text}>Context </span>
-                <span fg={theme.accent}>{bar.filled}</span>
-                <span fg={theme.textMuted}>{bar.empty}</span>
-                <span fg={theme.textMuted}>{` ${context.percent}% `}</span>
-                <span fg={theme.textMuted}>
-                  {`${formatTokenCount(context.tokens)} / ${formatTokenCount(context.limit)}`}
-                </span>
-              </>
-            )
+            const openCodeText =
+              context.openCodeLimit !== undefined
+                ? `OpenCode: ${formatTokenCount(context.openCodeLimit)}`
+                : "OpenCode: ❓"
+
+            const mtplxText =
+              context.mtplxLimit !== undefined
+                ? `MTPLX: ${formatTokenCount(context.mtplxLimit)}`
+                : "MTPLX: ⏬ ❓"
+
+            let status = "❓"
+
+            if (
+              context.openCodeLimit !== undefined &&
+              context.mtplxLimit !== undefined
+            ) {
+              status =
+                context.openCodeLimit === context.mtplxLimit
+                  ? "✅"
+                  : "⚠️"
+            }
+
+            return `ctx  ${openCodeText} · ${mtplxText} ${status}`
           })()}
         </text>
       ) : null}
+
       <text fg={props.api.theme.current.textMuted}>
         {(() => {
           const timestamp = props.promptTimestamp()
@@ -390,6 +650,63 @@ const tui: TuiPlugin = async (api, options) => {
   const paddingBottom = num(options?.paddingBottom, 0)
   const paddingLeft = num(options?.paddingLeft, 3)
   const paddingRight = num(options?.paddingRight, 2)
+
+  // ---------------------------------------------------------------------------
+  // REACTIVE CONTEXT / PROMPT DATA
+  // ---------------------------------------------------------------------------
+
+  const [promptTimestamp, setPromptTimestamp] =
+    createSignal<string | null>(null)
+
+  const [contextRefreshTick, setContextRefreshTick] =
+    createSignal(0)
+
+  const [mtplxContextWindow, setMtplxContextWindow] =
+    createSignal<number | undefined>(undefined)
+
+  let mtplxPollTimer: ReturnType<typeof setInterval> | undefined
+
+  const pollMtplx = async () => {
+    const route = api.route.current
+
+    if (route.name !== "session" || !("params" in route)) {
+      setMtplxContextWindow(undefined)
+      return
+    }
+
+    const sessionID = route.params?.sessionID
+
+    if (typeof sessionID !== "string") {
+      setMtplxContextWindow(undefined)
+      return
+    }
+
+    const messages = api.state.session.messages(sessionID) ?? []
+    const baseUrl = findMtplxBaseUrl(api, messages)
+
+    if (!baseUrl) {
+      setMtplxContextWindow(undefined)
+      return
+    }
+
+    setMtplxContextWindow(
+      await fetchMtplxContextWindow(baseUrl),
+    )
+  }
+
+  // Poll the same provider endpoint OpenCode already uses. There is no
+  // separate MTPLX URL in tui.json and no hard-coded MTPLX port.
+  void pollMtplx()
+
+  mtplxPollTimer = setInterval(() => {
+    void pollMtplx()
+  }, 2000)
+
+  onCleanup(() => {
+    if (mtplxPollTimer) {
+      clearInterval(mtplxPollTimer)
+    }
+  })
 
   // ---------------------------------------------------------------------------
   // CURRENT SESSION
@@ -449,11 +766,6 @@ const tui: TuiPlugin = async (api, options) => {
 
   const [elapsedMs, setElapsedMs] =
     createSignal(0)
-
-  // Most recent prompt submission time. This remains frozen until the next
-  // prompt is submitted.
-  const [promptTimestamp, setPromptTimestamp] =
-    createSignal<string | null>(null)
 
   const [startedAt, setStartedAt] =
     createSignal<number | null>(null)
@@ -537,10 +849,6 @@ const tui: TuiPlugin = async (api, options) => {
       ) {
         return
       }
-
-      // Start the stopwatch immediately when Enter submits the prompt.
-      // The timestamp itself is recorded from the resulting user message
-      // below, which is more reliable across OpenCode TUI builds.
 
       const sessionID =
         currentSession()
@@ -645,12 +953,11 @@ const tui: TuiPlugin = async (api, options) => {
     },
   )
 
-  // Last submitted user message whose timestamp we have recorded.
-  let lastPromptMessageID: string | undefined
-
   api.event.on(
     "message.updated",
     (event) => {
+      setContextRefreshTick((value) => value + 1)
+
       const info =
         event.properties?.info
 
@@ -658,19 +965,10 @@ const tui: TuiPlugin = async (api, options) => {
         return
       }
 
-      // A submitted prompt becomes a user message. Use its creation time as
-      // the prompt timestamp. Track the message ID so repeated updates to the
-      // same user message cannot move the timestamp.
       if (info.role === "user") {
-        if (
-          info.id !== lastPromptMessageID &&
-          typeof info.time?.created === "number"
-        ) {
-          lastPromptMessageID = info.id
+        if (typeof info.time?.created === "number") {
           setPromptTimestamp(
-            formatPromptTimestamp(
-              new Date(info.time.created),
-            ),
+            formatPromptTimestamp(new Date(info.time.created)),
           )
         }
 
@@ -811,6 +1109,8 @@ const tui: TuiPlugin = async (api, options) => {
             stats={stats}
             elapsedMs={elapsedMs}
             promptTimestamp={promptTimestamp}
+            contextRefreshTick={contextRefreshTick}
+            mtplxContextWindow={mtplxContextWindow}
             show={show}
             paddingLeft={paddingLeft}
             paddingRight={paddingRight}
