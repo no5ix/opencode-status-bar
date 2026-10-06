@@ -22,6 +22,7 @@ type Stat = {
 }
 
 const DEFAULT_SHOW = [
+  "context",
   "tps",
   "decode",
   "cost",
@@ -39,6 +40,19 @@ const usd = (c: number) =>
 
 const num = (v: unknown, d: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : d
+
+const formatTokenCount = (value: number): string =>
+  Math.max(0, Math.round(value)).toLocaleString("en-US")
+
+const contextBarParts = (percent: number, width = 16) => {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const filled = Math.round((clamped / 100) * width)
+
+  return {
+    filled: "█".repeat(filled),
+    empty: "░".repeat(width - filled),
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Stopwatch formatting
@@ -252,6 +266,52 @@ function StatusBarView(props: {
       .join(SEP)
   })
 
+  const contextInfo = createMemo(() => {
+    const sessionID = props.sessionID()
+
+    if (!sessionID) {
+      return undefined
+    }
+
+    const messages =
+      props.api.state.session.messages(sessionID) ?? []
+
+    // Match OpenCode's built-in sidebar context calculation.
+    const lastAssistant = messages.findLast(
+      (message: any) =>
+        message.role === "assistant" &&
+        message.tokens &&
+        (message.tokens.output ?? 0) > 0,
+    )
+
+    if (!lastAssistant) {
+      return undefined
+    }
+
+    const tokens =
+      (lastAssistant.tokens.input ?? 0) +
+      (lastAssistant.tokens.output ?? 0) +
+      (lastAssistant.tokens.reasoning ?? 0) +
+      (lastAssistant.tokens.cache?.read ?? 0) +
+      (lastAssistant.tokens.cache?.write ?? 0)
+
+    const model = props.api.state.provider
+      .find((provider: any) => provider.id === lastAssistant.providerID)
+      ?.models?.[lastAssistant.modelID]
+
+    const limit = model?.limit?.context
+
+    if (typeof limit !== "number" || limit <= 0) {
+      return undefined
+    }
+
+    return {
+      tokens,
+      limit,
+      percent: Math.round((tokens / limit) * 100),
+    }
+  })
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -267,6 +327,27 @@ function StatusBarView(props: {
       marginTop={props.marginTop}
       marginBottom={props.marginBottom}
     >
+      {props.show.includes("context") && contextInfo() ? (
+        <text>
+          {(() => {
+            const context = contextInfo()!
+            const bar = contextBarParts(context.percent)
+            const theme = props.api.theme.current
+
+            return (
+              <>
+                <span fg={theme.text}>Context </span>
+                <span fg={theme.accent}>{bar.filled}</span>
+                <span fg={theme.textMuted}>{bar.empty}</span>
+                <span fg={theme.textMuted}>{` ${context.percent}% `}</span>
+                <span fg={theme.textMuted}>
+                  {`${formatTokenCount(context.tokens)} / ${formatTokenCount(context.limit)}`}
+                </span>
+              </>
+            )
+          })()}
+        </text>
+      ) : null}
       <text fg={props.api.theme.current.textMuted}>
         {(() => {
           const timestamp = props.promptTimestamp()
