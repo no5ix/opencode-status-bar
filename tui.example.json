@@ -1,0 +1,4 @@
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [["./plugins/status-bar/status-bar.tsx", { "show": ["tps", "decode", "ttft", "dur", "cache", "todo", "pending"] }]]
+}

@@ -44,6 +44,9 @@ const num = (v: unknown, d: number) =>
 // Stopwatch formatting
 // -----------------------------------------------------------------------------
 
+const formatPromptTimestamp = (date: Date = new Date()): string =>
+  `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`
+
 const formatElapsed = (ms: number): string => {
   const totalSeconds = Math.floor(Math.max(0, ms) / 1000)
 
@@ -77,6 +80,9 @@ function StatusBarView(props: {
 
   // Current-prompt stopwatch.
   elapsedMs: () => number
+
+  // Timestamp of the most recent prompt submission.
+  promptTimestamp: () => string | null
 
   show: string[]
 
@@ -262,6 +268,13 @@ function StatusBarView(props: {
       marginBottom={props.marginBottom}
     >
       <text fg={props.api.theme.current.textMuted}>
+        {(() => {
+          const timestamp = props.promptTimestamp()
+
+          return timestamp
+            ? `↩︎ ${timestamp}${SEP}`
+            : ""
+        })()}
         {`⏱ ${formatElapsed(props.elapsedMs())}`}
         {(() => {
           const existing = existingSegments()
@@ -356,6 +369,11 @@ const tui: TuiPlugin = async (api, options) => {
   const [elapsedMs, setElapsedMs] =
     createSignal(0)
 
+  // Most recent prompt submission time. This remains frozen until the next
+  // prompt is submitted.
+  const [promptTimestamp, setPromptTimestamp] =
+    createSignal<string | null>(null)
+
   const [startedAt, setStartedAt] =
     createSignal<number | null>(null)
 
@@ -438,6 +456,10 @@ const tui: TuiPlugin = async (api, options) => {
       ) {
         return
       }
+
+      // Start the stopwatch immediately when Enter submits the prompt.
+      // The timestamp itself is recorded from the resulting user message
+      // below, which is more reliable across OpenCode TUI builds.
 
       const sessionID =
         currentSession()
@@ -542,16 +564,39 @@ const tui: TuiPlugin = async (api, options) => {
     },
   )
 
+  // Last submitted user message whose timestamp we have recorded.
+  let lastPromptMessageID: string | undefined
+
   api.event.on(
     "message.updated",
     (event) => {
       const info =
         event.properties?.info
 
-      if (
-        !info ||
-        info.role !== "assistant"
-      ) {
+      if (!info) {
+        return
+      }
+
+      // A submitted prompt becomes a user message. Use its creation time as
+      // the prompt timestamp. Track the message ID so repeated updates to the
+      // same user message cannot move the timestamp.
+      if (info.role === "user") {
+        if (
+          info.id !== lastPromptMessageID &&
+          typeof info.time?.created === "number"
+        ) {
+          lastPromptMessageID = info.id
+          setPromptTimestamp(
+            formatPromptTimestamp(
+              new Date(info.time.created),
+            ),
+          )
+        }
+
+        return
+      }
+
+      if (info.role !== "assistant") {
         return
       }
 
@@ -684,6 +729,7 @@ const tui: TuiPlugin = async (api, options) => {
             sessionID={currentSession}
             stats={stats}
             elapsedMs={elapsedMs}
+            promptTimestamp={promptTimestamp}
             show={show}
             paddingLeft={paddingLeft}
             paddingRight={paddingRight}
