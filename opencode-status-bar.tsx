@@ -318,7 +318,7 @@ function StatusBarView(props: {
         s &&
         !s.live &&
         s.ms
-          ? `${(s.ms / 1000).toFixed(1)}s`
+          ? `dur ${(s.ms / 1000).toFixed(1)}s`
           : "",
 
       cache:
@@ -415,13 +415,13 @@ function StatusBarView(props: {
             const context = contextInfo()!
             const openCodeText =
               context.openCodeLimit !== undefined
-                ? `OpenCode: ${formatTokenCount(context.openCodeLimit)}`
-                : "OpenCode: ❓"
+                ? `[OpenCode: ${formatTokenCount(context.openCodeLimit)}]`
+                : "[OpenCode: ❓]"
 
             const mtplxText =
               context.mtplxLimit !== undefined
-                ? `MTPLX: ${formatTokenCount(context.mtplxLimit)}`
-                : "MTPLX: ⏬ ❓"
+                ? `[MTPLX: ${formatTokenCount(context.mtplxLimit)}]`
+                : "[MTPLX: ⏬ ❓]"
 
             const status =
               context.openCodeLimit !== undefined && context.mtplxLimit !== undefined
@@ -435,7 +435,7 @@ function StatusBarView(props: {
 
             return `${status} ctx ${openCodeText} ${relation} ${mtplxText} · ⏰ ${formatElapsed(props.elapsedMs())} · ${(() => {
               const timestamp = props.promptTimestamp()
-              return timestamp ? `⤴️ ${timestamp}` : "⤴️ --:--:--"
+              return timestamp ? `⤴️  ${timestamp}` : "⤴️  --:--:--"
             })()}`
           })()}
         </text>
