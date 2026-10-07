@@ -603,6 +603,16 @@ const tui: TuiPlugin = async (api, options) => {
     setStartedAt(Date.now())
   }
 
+  const startNewPrompt = (
+    sessionID: string,
+  ) => {
+    setPromptTimestamp(
+      formatPromptTimestamp(new Date()),
+    )
+
+    startStopwatch(sessionID)
+  }
+
   // ---------------------------------------------------------------------------
   // STOP STOPWATCH
   // ---------------------------------------------------------------------------
@@ -652,13 +662,7 @@ const tui: TuiPlugin = async (api, options) => {
         return
       }
 
-      const now = Date.now()
-
-      setPromptTimestamp(
-        formatPromptTimestamp(new Date(now))
-      )
-
-      startStopwatch(sessionID)
+      startNewPrompt(sessionID)
     },
   )
 
@@ -686,7 +690,7 @@ const tui: TuiPlugin = async (api, options) => {
           stopwatchSessionID !== sessionID ||
           startedAt() === null
         ) {
-          startStopwatch(sessionID)
+          startNewPrompt(sessionID)
         }
 
         return
