@@ -425,7 +425,7 @@ function StatusBarView(props: {
 
             const status =
               context.openCodeLimit !== undefined && context.mtplxLimit !== undefined
-                ? context.openCodeLimit === context.mtplxLimit ? "✅ " : "⚠️ "
+                ? context.openCodeLimit === context.mtplxLimit ? "☑️ " : "⚠️ "
                 : "❓"
 
             const relation =
